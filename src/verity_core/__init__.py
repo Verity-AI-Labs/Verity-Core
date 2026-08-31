@@ -12,6 +12,7 @@ from verity_core.env import (
     TaskSpec,
     VerityEnv,
 )
+from verity_core.runner import ExecResult, ResourceLimits, SandboxError, SandboxRunner
 
 __version__ = "0.1.0"
 
@@ -19,9 +20,13 @@ __all__ = [
     "DOMAINS",
     "REWARD_TYPES",
     "Domain",
+    "ExecResult",
     "Observation",
+    "ResourceLimits",
     "RewardResult",
     "RewardType",
+    "SandboxError",
+    "SandboxRunner",
     "StepResult",
     "TaskSpec",
     "VerityConfig",
