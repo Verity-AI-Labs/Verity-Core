@@ -14,12 +14,15 @@ from verity_core.env import (
 )
 from verity_core.models import ModelClient, ModelError, ModelResponse, ResponseCache, TokenUsage
 from verity_core.runner import ExecResult, ResourceLimits, SandboxError, SandboxRunner
+from verity_core.scorecard import AXES, AxisValue, Scorecard
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "AXES",
     "DOMAINS",
     "REWARD_TYPES",
+    "AxisValue",
     "Domain",
     "ExecResult",
     "ModelClient",
@@ -32,6 +35,7 @@ __all__ = [
     "RewardType",
     "SandboxError",
     "SandboxRunner",
+    "Scorecard",
     "StepResult",
     "TaskSpec",
     "TokenUsage",
