@@ -25,6 +25,13 @@ from verity_core.env import (
 )
 from verity_core.logs import configure_logging
 from verity_core.models import ModelClient, ModelError, ModelResponse, ResponseCache, TokenUsage
+from verity_core.reporting import (
+    AxisStats,
+    CorpusReport,
+    aggregate_scorecards,
+    build_corpus_report,
+    load_scorecards,
+)
 from verity_core.runner import ExecResult, ResourceLimits, SandboxError, SandboxRunner
 from verity_core.scorecard import AXES, AxisValue, Scorecard
 
@@ -39,9 +46,11 @@ __all__ = [
     "AXES",
     "DOMAINS",
     "REWARD_TYPES",
+    "AxisStats",
     "AxisValue",
     "BatchResult",
     "CorpusError",
+    "CorpusReport",
     "CorpusStats",
     "DockerTestAdapter",
     "Domain",
@@ -68,12 +77,15 @@ __all__ = [
     "VerityConfig",
     "VerityEnv",
     "__version__",
+    "aggregate_scorecards",
+    "build_corpus_report",
     "completed_env_ids",
     "configure_logging",
     "corpus_stats",
     "load_config",
     "load_corpus",
     "load_env",
+    "load_scorecards",
     "resolve_config",
     "run_batch",
 ]
