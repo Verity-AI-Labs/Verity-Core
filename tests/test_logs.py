@@ -4,23 +4,8 @@ from __future__ import annotations
 
 import io
 import logging
-from collections.abc import Iterator
-
-import pytest
 
 from verity_core.logs import NAMESPACE, configure_logging, get_logger
-
-
-@pytest.fixture(autouse=True)
-def restore_namespace_logger() -> Iterator[None]:
-    """Leave the verity_core logger exactly as it was found."""
-    logger = logging.getLogger(NAMESPACE)
-    handlers = list(logger.handlers)
-    level, propagate = logger.level, logger.propagate
-    yield
-    logger.handlers = handlers
-    logger.setLevel(level)
-    logger.propagate = propagate
 
 
 class TestGetLogger:

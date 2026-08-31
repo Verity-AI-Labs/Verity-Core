@@ -9,6 +9,7 @@ how output is decoded, and how snapshots and cleanup are sequenced.
 from __future__ import annotations
 
 import io
+import logging
 import tarfile
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
@@ -16,7 +17,27 @@ from typing import Any
 import pytest
 from docker.errors import NotFound
 
+from verity_core.logs import NAMESPACE
+
 CommandHandler = Callable[[str, dict[str, bytes]], tuple[int, str, str]]
+
+
+@pytest.fixture(autouse=True)
+def isolate_logging() -> Iterator[None]:
+    """Undo any change a test makes to the ``verity_core`` logger.
+
+    The CLI configures logging as a side effect of running a command, which would
+    otherwise leak handlers and levels into every test that ran after it.
+    """
+    logger = logging.getLogger(NAMESPACE)
+    handlers = list(logger.handlers)
+    level, propagate = logger.level, logger.propagate
+    try:
+        yield
+    finally:
+        logger.handlers = handlers
+        logger.setLevel(level)
+        logger.propagate = propagate
 
 
 def _default_handler(command: str, files: dict[str, bytes]) -> tuple[int, str, str]:
