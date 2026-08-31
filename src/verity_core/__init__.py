@@ -10,6 +10,7 @@ from verity_core.adapters import (
     load_env,
 )
 from verity_core.config import ResolvedConfig, VerityConfig, load_config, resolve_config
+from verity_core.corpus import CorpusError, CorpusStats, corpus_stats, load_corpus
 from verity_core.env import (
     DOMAINS,
     REWARD_TYPES,
@@ -38,6 +39,8 @@ __all__ = [
     "DOMAINS",
     "REWARD_TYPES",
     "AxisValue",
+    "CorpusError",
+    "CorpusStats",
     "DockerTestAdapter",
     "Domain",
     "ExecResult",
@@ -63,7 +66,9 @@ __all__ = [
     "VerityEnv",
     "__version__",
     "configure_logging",
+    "corpus_stats",
     "load_config",
+    "load_corpus",
     "load_env",
     "resolve_config",
 ]
