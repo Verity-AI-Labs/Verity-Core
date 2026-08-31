@@ -12,6 +12,7 @@ from verity_core.env import (
     TaskSpec,
     VerityEnv,
 )
+from verity_core.models import ModelClient, ModelError, ModelResponse, ResponseCache, TokenUsage
 from verity_core.runner import ExecResult, ResourceLimits, SandboxError, SandboxRunner
 
 __version__ = "0.1.0"
@@ -21,14 +22,19 @@ __all__ = [
     "REWARD_TYPES",
     "Domain",
     "ExecResult",
+    "ModelClient",
+    "ModelError",
+    "ModelResponse",
     "Observation",
     "ResourceLimits",
+    "ResponseCache",
     "RewardResult",
     "RewardType",
     "SandboxError",
     "SandboxRunner",
     "StepResult",
     "TaskSpec",
+    "TokenUsage",
     "VerityConfig",
     "VerityEnv",
     "__version__",
