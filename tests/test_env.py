@@ -36,6 +36,51 @@ def make_spec(**overrides: Any) -> TaskSpec:
 class ConformingEnv:
     """A minimal structural implementation, standing in for a real adapter."""
 
+    def __init__(self) -> None:
+        self.closed = 0
+        self.resets = 0
+
+    def spec(self) -> TaskSpec:
+        return make_spec()
+
+    def reset(self) -> Observation:
+        self.resets += 1
+        return Observation(text="start")
+
+    def step(self, action: str) -> StepResult:
+        return StepResult(Observation(text=action), 0.0, False)
+
+    def verify(self, submission: str) -> RewardResult:
+        return RewardResult(1.0, True)
+
+    def gold_solution(self) -> str | None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b"{}"
+
+    def restore(self, snap: bytes) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def __enter__(self) -> ConformingEnv:
+        self.reset()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
+        self.close()
+
+
+class PartialEnv:
+    """Implements the task methods but not teardown, so it must not conform."""
+
     def spec(self) -> TaskSpec:
         return make_spec()
 
@@ -56,14 +101,6 @@ class ConformingEnv:
 
     def restore(self, snap: bytes) -> None:
         return None
-
-
-class PartialEnv:
-    def spec(self) -> TaskSpec:
-        return make_spec()
-
-    def reset(self) -> Observation:
-        return Observation(text="start")
 
 
 class TestDomainConstants:
@@ -153,8 +190,40 @@ class TestProtocolConformance:
     def test_a_full_implementation_conforms(self) -> None:
         assert isinstance(ConformingEnv(), VerityEnv)
 
-    def test_a_partial_implementation_does_not_conform(self) -> None:
+    def test_an_implementation_without_teardown_does_not_conform(self) -> None:
+        # A tool holding a generic VerityEnv must be able to release it, so close and
+        # the context-manager methods are part of the contract.
         assert not isinstance(PartialEnv(), VerityEnv)
+
+    @pytest.mark.parametrize(
+        "method",
+        ["spec", "reset", "step", "verify", "gold_solution", "snapshot", "restore", "close"],
+    )
+    def test_the_protocol_declares_each_expected_method(self, method: str) -> None:
+        assert callable(getattr(VerityEnv, method))
+
+    def test_the_protocol_declares_the_context_manager_methods(self) -> None:
+        assert callable(VerityEnv.__enter__)
+        assert callable(VerityEnv.__exit__)
+
+    def test_close_is_reachable_through_the_protocol(self) -> None:
+        env: VerityEnv = ConformingEnv()
+        env.close()
+        assert isinstance(env, ConformingEnv)
+        assert env.closed == 1
+
+    def test_a_conforming_env_works_as_a_context_manager(self) -> None:
+        instance = ConformingEnv()
+        with instance as env:
+            assert env is instance
+            assert instance.resets == 1
+        assert instance.closed == 1
+
+    def test_the_context_manager_closes_when_the_body_raises(self) -> None:
+        instance = ConformingEnv()
+        with pytest.raises(RuntimeError), instance:
+            raise RuntimeError("audit blew up")
+        assert instance.closed == 1
 
     def test_conforming_env_is_usable_through_the_protocol(self) -> None:
         env: VerityEnv = ConformingEnv()

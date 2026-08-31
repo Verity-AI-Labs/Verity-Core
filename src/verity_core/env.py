@@ -12,6 +12,7 @@ third-party environments usable without wrapping them in our class hierarchy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import TracebackType
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 Domain = Literal["browser", "gui", "tool_use", "code", "math", "other"]
@@ -147,7 +148,14 @@ class RewardResult:
 
 @runtime_checkable
 class VerityEnv(Protocol):
-    """The seven methods every audited environment must expose."""
+    """The interface every audited environment must expose.
+
+    Seven methods carry the task itself, and the remaining three cover teardown.
+    Release is part of the protocol rather than an adapter detail because a tool that
+    receives a generic ``VerityEnv`` has to be able to free the resources behind it;
+    without ``close`` declared here, cleaning up correctly would mean type-checking
+    against a concrete adapter, which is exactly the coupling this protocol removes.
+    """
 
     def spec(self) -> TaskSpec:
         """Return the task metadata, including the pinned upstream revision."""
@@ -175,4 +183,26 @@ class VerityEnv(Protocol):
 
     def restore(self, snap: bytes) -> None:
         """Restore state from a token previously produced by :meth:`snapshot`."""
+        ...
+
+    def close(self) -> None:
+        """Release whatever the environment holds: containers, images, open handles.
+
+        Must be safe to call more than once, and safe to call on an environment that
+        was never reset, since teardown often runs from an ``except`` or ``finally``
+        block where the caller cannot know how far setup progressed.
+        """
+        ...
+
+    def __enter__(self) -> VerityEnv:
+        """Prepare the environment for use and return it."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Tear the environment down, whether or not the body raised."""
         ...

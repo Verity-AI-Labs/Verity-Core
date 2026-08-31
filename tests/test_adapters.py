@@ -507,6 +507,18 @@ class TestVerifiersAdapter:
         with pytest.raises(ManifestError, match="declares no 'rollout' function"):
             env.rollout()
 
+    def test_works_as_a_context_manager(self) -> None:
+        with load_env(VERIFIERS_MANIFEST, reward_fn=exact_answer) as env:
+            assert env.verify("42").verdict is True
+
+    def test_close_clears_the_transcript_and_is_repeatable(self) -> None:
+        env = load_env(VERIFIERS_MANIFEST, reward_fn=exact_answer)
+        env.reset()
+        env.step("42")
+        env.close()
+        env.close()
+        assert json.loads(env.snapshot().decode())["transcript"] == []
+
     def test_rollout_passes_arguments_through(self) -> None:
         env = load_env(
             VERIFIERS_MANIFEST,

@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import Mapping
+from types import TracebackType
 from typing import Any
 
 from verity_core.adapters.base import ManifestError, parse_task_spec, resolve_callable
 from verity_core.env import Observation, RewardResult, StepResult, TaskSpec
+
+logger = logging.getLogger(__name__)
 
 REWARD_KEYS = ("reward", "score", "value")
 VERDICT_KEYS = ("verdict", "passed", "success", "correct")
@@ -226,5 +230,18 @@ class VerifiersAdapter:
         self._transcript = [str(item) for item in token.get("transcript") or []]
 
     def close(self) -> None:
-        """Present for interface symmetry with the container adapters; nothing to release."""
+        """Drop the transcript. There is no container here, so nothing else to release."""
+        logger.debug("closing verifiers env id=%s", self._spec.id)
         self._transcript.clear()
+
+    def __enter__(self) -> VerifiersAdapter:
+        self.reset()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
