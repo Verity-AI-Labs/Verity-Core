@@ -12,6 +12,11 @@ verity-core implements that once. The tools — **Verity-RedTeam**, **Verity-Sig
 depend on this library, so none of them reimplements environment loading, sandboxing,
 model access, or the scorecard format.
 
+It also carries the scaffolding an audit needs at corpus scale: loading a directory of
+manifests, running an audit function across all of them with failures isolated and the
+run resumable, aggregating the resulting scorecards into a corpus-level defect report,
+and logging enough to reconstruct what happened at environment 147.
+
 ## Install
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Docker is needed only to
@@ -39,7 +44,17 @@ uv run ruff format --check .
 ### 1. `VerityEnv` protocol — `verity_core/env.py`
 
 The universal interface every environment conforms to: `spec()`, `reset()`,
-`step()`, `verify()`, `gold_solution()`, `snapshot()`, and `restore()`.
+`step()`, `verify()`, `gold_solution()`, `snapshot()`, and `restore()`, plus `close()`
+and the context-manager pair `__enter__` / `__exit__`.
+
+Teardown is part of the protocol, not an adapter detail, so a tool holding a generic
+`VerityEnv` can always release what is behind it:
+
+```python
+with load_env(entry) as env:
+    result = env.verify(submission)
+# the container, if there was one, is gone here
+```
 
 It is a `typing.Protocol`, not an abstract base class, so adapters conform
 structurally and no upstream environment has to inherit from our class hierarchy.
@@ -121,6 +136,16 @@ over `VERITY_*` environment variables, which win over the defaults. Resolving pe
 means a config file that only pins `model_name` still picks up a `VERITY_CACHE_DIR` set
 by CI.
 
+The precedence rule lives in one place, the `LAYERS` tuple, which the resolver folds in
+order rather than relying on which dict gets updated into which:
+
+```python
+LAYERS: tuple[str, ...] = ("defaults", "environment", "file")
+```
+
+`resolve_config()` additionally reports which layer supplied each value, which is what
+`verity-core config` prints when you need to know why a setting is what it is.
+
 ```yaml
 # verity.yaml
 model_base_url: http://localhost:8000/v1
@@ -135,10 +160,167 @@ docker_network_disabled: true
 Unknown keys are rejected rather than ignored, so a typo like `docker_memroy_limit`
 cannot leave an audit running with limits the operator believes they overrode.
 
+### 7. Corpus loader — `verity_core/corpus.py`
+
+`load_corpus()` turns a directory of YAML manifests into a list of validated manifest
+entry dicts, each ready for `load_env()`. It touches neither Docker nor any environment:
+counting how many browser tasks a corpus holds should not start a container.
+
+```python
+from verity_core import corpus_stats, load_corpus
+
+browser = load_corpus("../Verity-Corpus/manifests/", domain="browser")
+for entry in browser:
+    with load_env(entry) as env:
+        ...
+
+stats = corpus_stats(load_corpus("../Verity-Corpus/manifests/"))
+print(stats.total, stats.by_domain, stats.gold_coverage)
+```
+
+Non-YAML files are skipped, empty manifests are ignored with a warning, and `id` /
+`format` are required. Format filtering is alias-aware, so `format="terminal"` also
+matches entries written as `terminal-bench`. Entries come back sorted by `id` so that
+repeated runs visit environments in the same order, which batch resumption depends on.
+
+Duplicate ids are always an error, even in `strict=False` mode: scorecard filenames
+derive from the id, so a duplicate would have one environment's results overwrite
+another's.
+
+### 8. Batch runner — `verity_core/batch.py`
+
+`run_batch()` runs a tool's audit function across a corpus and collects the outcomes. A
+single environment crashing is recorded and stepped over rather than allowed to end the
+run, since broken environments are what an audit exists to find.
+
+```python
+from verity_core import load_corpus, run_batch
+
+
+def audit(entry):
+    with load_env(entry) as env:
+        result = env.verify(env.gold_solution() or "")
+    card = Scorecard(env_id=entry["id"], metadata={"domain": entry.get("domain")})
+    card.set_axis("V1", 0.0 if result.verdict else 1.0, "my-tool")
+    return card
+
+
+batch = run_batch(
+    load_corpus("../Verity-Corpus/manifests/"),
+    audit,
+    results_dir="results/",
+    resume=True,
+    model_client=client,
+)
+print(batch.succeeded, batch.failed, batch.skipped, batch.total_tokens)
+for failure in batch.failures:
+    print(failure.env_id, failure.error_type, failure.error)
+```
+
+With `resume=True` the runner skips environments that already have a scorecard in the
+results directory, so a run that dies at environment 180 of 200 picks up where it left
+off instead of starting over. Ids are read from inside each scorecard rather than
+inferred from filenames, and unreadable files are ignored so that a scorecard truncated
+by the crash you are resuming from gets re-audited.
+
+Returning `None` from the audit function records a skip rather than a failure, which is
+how a tool declares an environment not applicable. `Ctrl-C` stops the run and returns
+what completed, with `interrupted` set.
+
+### 9. Reporting — `verity_core/reporting.py`
+
+`build_corpus_report()` aggregates a directory of scorecards into the corpus-level
+result: per-axis statistics, defect rates, domain breakdown, and the most-flagged
+environments, rendered as JSON and Markdown.
+
+```python
+from verity_core import build_corpus_report
+
+report = build_corpus_report("results/", threshold=0.5, output_dir="reports/")
+print(report.defect_rate)  # fraction flagged on at least one validity axis
+print(report.axis_stats["V1"].mean)
+print(report.to_markdown())
+```
+
+An axis nobody measured is counted under `missing`, never averaged in as zero, so a thin
+run reads as low coverage rather than a clean corpus.
+
+Flagging direction is a parameter, not an assumption. The default flags a score at or
+above the threshold, matching a rubric where a higher score is a more serious defect;
+pass `direction="below"` for a rubric scored the other way.
+
+### 10. CLI — `verity_core/cli.py`
+
+Installed as `verity-core`. A convenience layer for the work around an audit; tools
+still import the Python API directly.
+
+```bash
+verity-core corpus ../Verity-Corpus/manifests/     # counts by domain, format, gold coverage
+verity-core corpus manifests/ --domain browser --json
+verity-core audit manifests/hello-world.yaml --results-dir results/
+verity-core report results/ --threshold 0.5 --output reports/
+verity-core config                                 # resolved values, annotated by source
+```
+
+`verity-core config` answers the question you actually have when a run misbehaves:
+
+```
+FIELD                    VALUE                     FROM
+model_base_url           http://localhost:8000/v1  defaults
+model_name               from-file                 file
+docker_timeout           42                        file
+docker_memory_limit      16g                       environment
+```
+
+`verity-core audit` fills in only what verity-core can measure alone: whether the
+environment's own verifier accepts its own reference solution. That lands on **V1**,
+scored as a defect indicator — `1.0` means the verifier *rejected* its own gold
+solution, which matches the direction the report flags on. The other twelve axes are
+left unscored for the four tools to fill in.
+
+Summaries go to stdout and logs to stderr, so `--json` output stays safe to pipe at any
+log level. Add `--log-level info` to watch an audit progress.
+
+### 11. Logging — `verity_core/logs.py`
+
+Every module logs through the `verity_core` namespace using the standard library only,
+so a tool can set verbosity for the whole library from its own entry point:
+
+```python
+import logging
+from verity_core import configure_logging
+
+configure_logging(logging.INFO)  # our defaults, to stderr
+logging.getLogger("verity_core").setLevel(logging.DEBUG)  # or configure it yourself
+```
+
+Messages are written as `event key=value` so a 200-environment run stays greppable:
+
+```
+2026-08-31T11:03:50 INFO  verity_core.runner | container started id=2aae1f96675b image=python:3.13-slim network_disabled=True
+2026-08-31T11:03:50 INFO  verity_core.adapters.base | verify complete env_id=docker/hello-world verdict=True reward=1.000 exit_code=0 duration=0.03s
+```
+
+`DEBUG` covers routine operations (every exec, every cache lookup), `INFO` lifecycle
+events (environment loaded, container started, scorecard written), `WARNING` recoverable
+problems that change how a result should be read (command timed out, submission would
+not apply, partial-credit grader fell back to binary, cache entry unreadable), and
+`ERROR` failures (daemon unreachable, container would not start, manifest invalid).
+
+The library installs only a `NullHandler`, so importing it never configures logging for
+its host.
+
 ## Usage
 
 ```python
-from verity_core import ModelClient, Scorecard, load_config, load_env
+from verity_core import (
+    ModelClient,
+    Scorecard,
+    build_corpus_report,
+    load_config,
+    load_env,
+)
+from verity_core.scorecard import scorecard_path
 
 config = load_config()
 config.ensure_dirs()
@@ -157,10 +339,9 @@ manifest_entry = {
     "limits": {"cpu_count": 2, "memory_limit": "4g", "timeout_seconds": 60},
 }
 
-env = load_env(manifest_entry)
-spec = env.spec()
+with load_env(manifest_entry) as env:
+    spec = env.spec()
 
-try:
     response = client.complete(
         config.model_name,
         [{"role": "user", "content": spec.instructions}],
@@ -175,25 +356,33 @@ try:
         gold_result = env.verify(gold)
     else:
         gold_result = None
-finally:
-    env.close()
 
-scorecard = Scorecard(env_id=spec.id)
+scorecard = Scorecard(env_id=spec.id, metadata={"domain": spec.domain})
 scorecard.set_axis(
     "V1",
-    value=result.reward,
+    # Scored as a defect: 1.0 means the environment rejected its own reference
+    # solution. This is the direction the reporting layer flags on.
+    value=None if gold_result is None else (0.0 if gold_result.verdict else 1.0),
     tool="verity-core-example",
     evidence={
-        "verdict": result.verdict,
+        "model_verdict": result.verdict,
+        "model_reward": result.reward,
+        "gold_verdict": None if gold_result is None else gold_result.verdict,
         "verifier_logs": result.verifier_logs,
-        "gold_passes": None if gold_result is None else gold_result.verdict,
         "tokens": client.total_usage.to_dict(),
     },
     notes="single-sample smoke check",
 )
 
-scorecard.to_json(config.results_dir / f"{spec.id.replace('/', '_')}.json")
+scorecard.to_json(scorecard_path(config.results_dir, spec.id))
 print(scorecard.to_markdown())
+```
+
+Aggregating a directory of those scorecards into the corpus-level result:
+
+```python
+report = build_corpus_report(config.results_dir, output_dir="reports/")
+print(f"defect rate: {report.defect_rate:.1%} of {report.total_scorecards} environments")
 ```
 
 ## Manifest fields
@@ -220,7 +409,8 @@ at which the verdict becomes true.
 
 Format names are matched loosely: `terminal-bench`, `terminal_wrench`, and `tbench` all
 select `TerminalAdapter`; `prime` and `swe-gym` map to their adapters too. Use
-`register_adapter()` to add a format without changing verity-core.
+`register_adapter()` to add a format without changing verity-core. Registration mutates
+module-level dicts and is not thread-safe; call it once during single-threaded startup.
 
 ## Not yet implemented
 
@@ -232,7 +422,15 @@ source:
   prebuilt `image`; a Dockerfile-only entry raises a clear `ManifestError`.
 - **Partial-credit grading.** Verifier output is not yet parsed per test, so a
   `partial` reward type falls back to a binary pass/fail. When it does, the scorecard
-  evidence records `grading: binary_fallback` rather than passing it off silently.
+  evidence records `grading: binary_fallback` rather than passing it off silently, and a
+  `WARNING` is logged.
+
+Two deliberate scope limits, not stubs:
+
+- **The batch runner is sequential.** Environments are audited one at a time. The
+  parallel worker pool comes later, and `register_adapter()` and the response cache are
+  annotated with what that will require.
+- **`verity-core audit` fills in one axis.** The other twelve belong to the four tools.
 
 ## License
 
