@@ -1,5 +1,6 @@
 """verity-core: the shared foundation for Verity Labs' RL environment audits."""
 
+from verity_core.config import VerityConfig, load_config
 from verity_core.env import (
     DOMAINS,
     REWARD_TYPES,
@@ -23,6 +24,8 @@ __all__ = [
     "RewardType",
     "StepResult",
     "TaskSpec",
+    "VerityConfig",
     "VerityEnv",
     "__version__",
+    "load_config",
 ]

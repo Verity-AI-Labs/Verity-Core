@@ -55,3 +55,7 @@ select = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Keeps the suite runnable straight from a checkout, without depending on the
+# editable install (whose .pth file macOS marks hidden inside uv-created venvs,
+# which makes Python's site module skip it).
+pythonpath = ["src"]
