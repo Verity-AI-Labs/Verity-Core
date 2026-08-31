@@ -171,6 +171,62 @@ class TestSerialization:
         assert loaded.get_axis("V1").evidence == {"exploits": 3, "trials": 50}
         assert loaded.metadata == {"commit": "9f8e7d6"}
 
+    def test_round_trip_preserves_an_empty_evidence_dict(self, tmp_path: Path) -> None:
+        # An empty dict has to survive as an empty dict: a tool that measured an axis
+        # without recording evidence is not the same as one that recorded nothing.
+        card = Scorecard(env_id="e")
+        card.set_axis("V1", 0.5, "verity-clean", {})
+        path = tmp_path / "sc.json"
+        card.to_json(path)
+        loaded = Scorecard.from_json(path)
+        assert loaded.get_axis("V1").evidence == {}
+        assert loaded.get_axis("V1").scored is True
+
+    def test_round_trip_preserves_every_field_of_every_axis(self, tmp_path: Path) -> None:
+        card = Scorecard(env_id="suite/full", metadata={"domain": "browser", "tokens": 1234})
+        for index, axis in enumerate(AXES):
+            card.set_axis(
+                axis,
+                value=None if index % 3 == 0 else index / len(AXES),
+                tool=f"tool-{index}",
+                evidence={} if index % 2 == 0 else {"trials": index, "nested": {"a": [1, 2]}},
+                notes="" if index % 4 == 0 else f"note {index}",
+            )
+
+        path = tmp_path / "sc.json"
+        card.to_json(path)
+        loaded = Scorecard.from_json(path)
+
+        assert loaded == card
+        assert loaded.env_id == card.env_id
+        assert loaded.timestamp == card.timestamp
+        assert loaded.schema_version == card.schema_version
+        assert loaded.metadata == {"domain": "browser", "tokens": 1234}
+        for axis in AXES:
+            original, restored = card.get_axis(axis), loaded.get_axis(axis)
+            assert restored.value == original.value
+            assert restored.tool == original.tool
+            assert restored.evidence == original.evidence
+            assert restored.notes == original.notes
+            assert restored.scored == original.scored
+
+    def test_round_trip_preserves_an_untouched_scorecard(self, tmp_path: Path) -> None:
+        card = Scorecard(env_id="suite/empty")
+        path = tmp_path / "sc.json"
+        card.to_json(path)
+        loaded = Scorecard.from_json(path)
+        assert loaded == card
+        assert loaded.scored_axes == ()
+        assert set(loaded.axes) == set(AXES)
+        assert all(entry.evidence == {} for entry in loaded.axes.values())
+
+    def test_round_trip_preserves_empty_metadata(self, tmp_path: Path) -> None:
+        card = Scorecard(env_id="e")
+        card.set_axis("V1", 1.0, "t")
+        path = tmp_path / "sc.json"
+        card.to_json(path)
+        assert Scorecard.from_json(path).metadata == {}
+
     def test_to_json_creates_missing_parent_directories(
         self, filled: Scorecard, tmp_path: Path
     ) -> None:

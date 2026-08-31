@@ -83,6 +83,25 @@ class TestFileLoading:
         with pytest.raises(ValueError, match="expected a YAML mapping"):
             load_config(path, env={})
 
+    def test_an_unknown_key_error_names_the_typo_the_file_and_the_valid_keys(
+        self, tmp_path: Path
+    ) -> None:
+        # A typo silently ignored would leave an audit running with limits the operator
+        # believes they set, so the error has to be immediate and self-explanatory.
+        path = write_yaml(tmp_path, "docker_memroy_limit: 8g\n")
+        with pytest.raises(ValueError) as excinfo:
+            load_config(path, env={})
+        message = str(excinfo.value)
+        assert str(path) in message
+        assert "unknown config key(s): docker_memroy_limit" in message
+        for field_name in (f.name for f in fields(VerityConfig)):
+            assert field_name in message
+
+    def test_reports_every_unknown_key_at_once(self, tmp_path: Path) -> None:
+        path = write_yaml(tmp_path, "nope: 1\nalso_nope: 2\n")
+        with pytest.raises(ValueError, match="also_nope, nope"):
+            load_config(path, env={})
+
     def test_rejects_an_unknown_key(self, tmp_path: Path) -> None:
         path = write_yaml(tmp_path, "docker_memroy_limit: 8g\n")
         with pytest.raises(ValueError, match="unknown config key"):

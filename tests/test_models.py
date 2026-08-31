@@ -7,6 +7,7 @@ model produces scorecards that cannot be compared with earlier ones.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -362,6 +363,32 @@ class TestErrorHandling:
             client.complete("m", MESSAGES)
         assert recorder.call_count == 3
 
+    @pytest.mark.parametrize("status", [429, 503, 500, 502, 504])
+    def test_a_transient_status_is_retried(
+        self, status: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("verity_core.models.time.sleep", lambda _: None)
+        recorder = Recorder(
+            httpx.Response(status, text="try again"),
+            httpx.Response(200, json=completion_payload()),
+        )
+        client = ModelClient(cache_dir=None, max_retries=2, http_client=recorder.client())
+        assert client.complete("m", MESSAGES).content == "4"
+        assert recorder.call_count == 2
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_a_client_error_status_is_not_retried(
+        self, status: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Retrying a rejected request cannot succeed; it just multiplies the failure and
+        # burns quota, so these statuses must fail on the first attempt.
+        monkeypatch.setattr("verity_core.models.time.sleep", lambda _: None)
+        recorder = Recorder(httpx.Response(status, text="rejected"))
+        client = ModelClient(cache_dir=None, max_retries=3, http_client=recorder.client())
+        with pytest.raises(ModelError, match=f"HTTP {status}"):
+            client.complete("m", MESSAGES)
+        assert recorder.call_count == 1
+
     def test_a_transport_failure_becomes_a_model_error(self) -> None:
         def explode(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("connection refused")
@@ -394,6 +421,149 @@ class TestErrorHandling:
         with pytest.raises(ModelError):
             failing.complete("m", MESSAGES)
         assert not list((tmp_path / "cache").rglob("*.json"))
+
+
+def make_key(cache: ResponseCache) -> str:
+    return cache.make_key(
+        base_url="http://x/v1",
+        model="m",
+        messages=MESSAGES,
+        temperature=0.0,
+        max_tokens=None,
+    )
+
+
+class TestCacheConcurrency:
+    """A worker pool will share one cache directory, so concurrent access must be safe."""
+
+    @staticmethod
+    def response(content: str) -> ModelResponse:
+        return ModelResponse(
+            content=content,
+            model="test-model",
+            finish_reason="stop",
+            usage=TokenUsage(11, 3, 14),
+        )
+
+    def test_concurrent_reads_of_one_key_all_see_the_same_entry(self, tmp_path: Path) -> None:
+        cache = ResponseCache(tmp_path / "cache")
+        key = make_key(cache)
+        cache.set(key, self.response("cached answer"))
+
+        results: list[str | None] = []
+        barrier = threading.Barrier(12)
+
+        def reader() -> None:
+            barrier.wait()
+            for _ in range(25):
+                hit = cache.get(key)
+                results.append(None if hit is None else hit.content)
+
+        threads = [threading.Thread(target=reader) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(results) == 12 * 25
+        assert set(results) == {"cached answer"}
+
+    def test_reads_concurrent_with_a_writer_never_see_a_partial_entry(self, tmp_path: Path) -> None:
+        # Readers may miss (before the first write) or hit, but must never observe a
+        # half-written file, since the rename is what publishes an entry.
+        cache = ResponseCache(tmp_path / "cache")
+        key = make_key(cache)
+        seen: list[str | None] = []
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def writer() -> None:
+            try:
+                for i in range(60):
+                    cache.set(key, self.response("answer" + "!" * i), request={"pad": "x" * 4000})
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                stop.set()
+
+        def reader() -> None:
+            try:
+                while not stop.is_set():
+                    hit = cache.get(key)
+                    seen.append(None if hit is None else hit.content)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer)] + [
+            threading.Thread(target=reader) for _ in range(6)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert all(value is None or value.startswith("answer") for value in seen)
+
+    def test_concurrent_writers_to_one_key_do_not_collide(self, tmp_path: Path) -> None:
+        # Writers used to share a single temporary filename, so the second one to rename
+        # would raise FileNotFoundError. The temporary name is now unique per writer.
+        cache = ResponseCache(tmp_path / "cache")
+        key = make_key(cache)
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(10)
+
+        def writer(index: int) -> None:
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    cache.set(key, self.response(f"answer-{index}"), request={"pad": "y" * 4000})
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        stored = cache.get(key)
+        assert stored is not None
+        assert stored.content.startswith("answer-")
+
+    def test_leaves_no_temporary_files_behind(self, tmp_path: Path) -> None:
+        cache = ResponseCache(tmp_path / "cache")
+        key = make_key(cache)
+        for i in range(5):
+            cache.set(key, self.response(f"answer-{i}"))
+        assert list((tmp_path / "cache").rglob("*.tmp")) == []
+
+    def test_the_stored_file_is_always_valid_json(self, tmp_path: Path) -> None:
+        cache = ResponseCache(tmp_path / "cache")
+        key = make_key(cache)
+        cache.set(key, self.response("answer"))
+        payload = json.loads(cache.path_for(key).read_text(encoding="utf-8"))
+        assert payload["response"]["content"] == "answer"
+
+    def test_concurrent_clients_sharing_a_cache_agree_on_the_answer(self, tmp_path: Path) -> None:
+        shared = tmp_path / "cache"
+        answers: list[str] = []
+        barrier = threading.Barrier(8)
+
+        def call() -> None:
+            recorder = Recorder(httpx.Response(200, json=completion_payload()))
+            client = ModelClient(cache_dir=shared, http_client=recorder.client())
+            barrier.wait()
+            answers.append(client.complete("m", MESSAGES).content)
+
+        threads = [threading.Thread(target=call) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert answers == ["4"] * 8
 
 
 class TestLifecycle:

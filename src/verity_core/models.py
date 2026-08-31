@@ -13,6 +13,7 @@ Two features exist specifically because these calls drive audits:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -176,7 +178,14 @@ class ResponseCache:
             return None
 
     def set(self, key: str, response: ModelResponse, request: dict[str, Any] | None = None) -> None:
-        """Write an entry atomically so a crash cannot leave a half-written file."""
+        """Write an entry atomically so a crash cannot leave a half-written file.
+
+        The temporary file name is unique per writer, not just per process. Two threads
+        caching the same key would otherwise share one temporary path, interleave their
+        writes into it, and race in :func:`os.replace`, where whichever thread renamed
+        second would fail outright. Readers only ever see a fully written file, since
+        the rename is what publishes it.
+        """
         path = self.path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -185,10 +194,17 @@ class ResponseCache:
             "request": request or {},
             "response": response.to_dict(),
         }
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        with tmp.open("w", encoding="utf-8") as handle:
-            json.dump(record, handle, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex[:12]}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(record, handle, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            # Leaving a stray temporary file behind would make the cache directory look
+            # corrupt to anyone inspecting it later.
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         logger.debug("cache write key=%s path=%s", key, path)
 
 

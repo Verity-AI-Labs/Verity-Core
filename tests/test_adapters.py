@@ -96,12 +96,44 @@ class TestFactory:
         assert canonical_format(alias) == expected
 
     def test_rejects_an_unknown_format(self) -> None:
-        with pytest.raises(ManifestError, match="unknown environment format"):
+        with pytest.raises(ManifestError, match="unknown environment format 'gymnasium'"):
             load_env({"id": "x", "format": "gymnasium"})
+
+    def test_an_unknown_format_error_lists_every_registered_format(self) -> None:
+        # The error has to be self-service: whoever hit it needs to see the valid
+        # options without going to read the source.
+        with pytest.raises(ManifestError) as excinfo:
+            load_env({"id": "x", "format": "gymnasium"})
+        message = str(excinfo.value)
+        assert "registered formats are" in message
+        for name in ADAPTERS:
+            assert name in message
 
     def test_rejects_a_manifest_without_a_format(self) -> None:
         with pytest.raises(ManifestError, match="needs a 'format' field"):
             load_env({"id": "x", "image": IMAGE})
+
+    def test_a_missing_format_error_names_the_environment(self) -> None:
+        with pytest.raises(ManifestError, match="manifest entry 'suite/env-7'"):
+            load_env({"id": "suite/env-7", "image": IMAGE})
+
+    def test_a_missing_format_error_copes_with_a_missing_id_too(self) -> None:
+        with pytest.raises(ManifestError, match="<missing id>"):
+            load_env({"image": IMAGE})
+
+    @pytest.mark.parametrize(
+        ("entry", "missing"),
+        [
+            ({"id": "x", "format": "terminal"}, "image"),
+            ({"id": "x", "format": "docker_test"}, "image"),
+            ({"id": "x", "format": "verifiers"}, "reward"),
+        ],
+    )
+    def test_a_missing_required_field_is_named(self, entry: dict[str, Any], missing: str) -> None:
+        # Container formats validate the image when the adapter is built; the verifiers
+        # format resolves its reward lazily. Either way the field has to be named.
+        with pytest.raises(ManifestError, match=f"needs an? {missing!r} field"):
+            load_env(entry).verify("submission")
 
     def test_rejects_a_manifest_that_is_not_a_mapping(self) -> None:
         with pytest.raises(ManifestError, match="must be a mapping"):
