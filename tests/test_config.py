@@ -178,7 +178,9 @@ class TestSerializationAndHelpers:
         assert "~" not in str(config.cache_dir)
 
     def test_ensure_dirs_creates_both_directories(self, tmp_path: Path) -> None:
-        config = VerityConfig(cache_dir=tmp_path / "a" / "cache", results_dir=tmp_path / "b" / "res")
+        config = VerityConfig(
+            cache_dir=tmp_path / "a" / "cache", results_dir=tmp_path / "b" / "res"
+        )
         config.ensure_dirs()
         assert config.cache_dir.is_dir()
         assert config.results_dir.is_dir()

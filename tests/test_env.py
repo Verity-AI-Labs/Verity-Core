@@ -68,8 +68,8 @@ class PartialEnv:
 
 class TestDomainConstants:
     def test_constants_match_the_literal_types(self) -> None:
-        assert DOMAINS == get_args(Domain)
-        assert REWARD_TYPES == get_args(RewardType)
+        assert get_args(Domain) == DOMAINS
+        assert get_args(RewardType) == REWARD_TYPES
 
     def test_expected_domains_are_present(self) -> None:
         assert set(DOMAINS) == {"browser", "gui", "tool_use", "code", "math", "other"}
