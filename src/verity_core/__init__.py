@@ -9,6 +9,7 @@ from verity_core.adapters import (
     VerifiersAdapter,
     load_env,
 )
+from verity_core.batch import BatchResult, EnvResult, completed_env_ids, run_batch
 from verity_core.config import ResolvedConfig, VerityConfig, load_config, resolve_config
 from verity_core.corpus import CorpusError, CorpusStats, corpus_stats, load_corpus
 from verity_core.env import (
@@ -39,10 +40,12 @@ __all__ = [
     "DOMAINS",
     "REWARD_TYPES",
     "AxisValue",
+    "BatchResult",
     "CorpusError",
     "CorpusStats",
     "DockerTestAdapter",
     "Domain",
+    "EnvResult",
     "ExecResult",
     "ManifestError",
     "ModelClient",
@@ -65,10 +68,12 @@ __all__ = [
     "VerityConfig",
     "VerityEnv",
     "__version__",
+    "completed_env_ids",
     "configure_logging",
     "corpus_stats",
     "load_config",
     "load_corpus",
     "load_env",
     "resolve_config",
+    "run_batch",
 ]

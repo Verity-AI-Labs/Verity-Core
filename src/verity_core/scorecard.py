@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +36,9 @@ EXCLUDED_AXES: dict[str, str] = {
 
 SCHEMA_VERSION = 1
 
+SCORECARD_SUFFIX = ".json"
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
 __all__ = [
     "AXES",
     "EXCLUDED_AXES",
@@ -43,11 +47,33 @@ __all__ = [
     "VALIDITY_AXES",
     "AxisValue",
     "Scorecard",
+    "scorecard_path",
+    "scorecard_slug",
 ]
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def scorecard_slug(env_id: str) -> str:
+    """Turn an environment id into a filesystem-safe filename stem.
+
+    Environment ids look like ``swe-gym/task-42``, so the separator has to go. The slug
+    stays human-readable rather than hashed, because someone debugging a corpus run
+    needs to find one environment's scorecard in a directory of two hundred by eye.
+    """
+    slug = _UNSAFE_IN_FILENAME.sub("__", str(env_id)).strip("_.")
+    return slug or "unnamed"
+
+
+def scorecard_path(results_dir: Path | str, env_id: str) -> Path:
+    """Where the scorecard for ``env_id`` belongs inside ``results_dir``.
+
+    Shared by the batch runner and the reporting layer so that writing and discovering
+    scorecards cannot drift apart.
+    """
+    return Path(results_dir) / f"{scorecard_slug(env_id)}{SCORECARD_SUFFIX}"
 
 
 def _validate_axis(axis: str) -> str:
