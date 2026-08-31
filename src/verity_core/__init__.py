@@ -1,5 +1,12 @@
 """verity-core: the shared foundation for Verity Labs' RL environment audits."""
 
+from verity_core.adapters import (
+    DockerTestAdapter,
+    ManifestError,
+    TerminalAdapter,
+    VerifiersAdapter,
+    load_env,
+)
 from verity_core.config import VerityConfig, load_config
 from verity_core.env import (
     DOMAINS,
@@ -23,8 +30,10 @@ __all__ = [
     "DOMAINS",
     "REWARD_TYPES",
     "AxisValue",
+    "DockerTestAdapter",
     "Domain",
     "ExecResult",
+    "ManifestError",
     "ModelClient",
     "ModelError",
     "ModelResponse",
@@ -38,9 +47,12 @@ __all__ = [
     "Scorecard",
     "StepResult",
     "TaskSpec",
+    "TerminalAdapter",
     "TokenUsage",
+    "VerifiersAdapter",
     "VerityConfig",
     "VerityEnv",
     "__version__",
     "load_config",
+    "load_env",
 ]
