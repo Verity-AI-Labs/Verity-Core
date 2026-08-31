@@ -76,8 +76,11 @@ class VerifiersAdapter:
         if self._reward_fn is None:
             reference = self.entry.get("reward")
             if not reference:
-                raise ManifestError(f"{self.context}: manifest entry needs a 'reward' field")
+                message = f"{self.context}: manifest entry needs a 'reward' field"
+                logger.error("%s", message)
+                raise ManifestError(message)
             self._reward_fn = resolve_callable(str(reference), context=self.context)
+            logger.debug("resolved reward function env_id=%s ref=%s", self._spec.id, reference)
         return self._reward_fn
 
     def _resolve_rollout_fn(self) -> Any | None:
@@ -92,6 +95,7 @@ class VerifiersAdapter:
         return self._spec
 
     def reset(self) -> Observation:
+        logger.info("env reset env_id=%s", self._spec.id)
         self._transcript.clear()
         return Observation(
             text=self._spec.instructions,
@@ -130,7 +134,15 @@ class VerifiersAdapter:
         """Run the environment's reward function against ``submission``."""
         fn = self._resolve_reward_fn()
         raw = self._call_reward_fn(fn, submission)
-        return self._normalize(raw)
+        result = self._normalize(raw)
+        logger.info(
+            "verify complete env_id=%s verdict=%s reward=%.3f threshold=%.3f",
+            self._spec.id,
+            result.verdict,
+            result.reward,
+            self.pass_threshold,
+        )
+        return result
 
     def _call_reward_fn(self, fn: Any, submission: str) -> Any:
         """Invoke the reward function using whichever signature it declares.

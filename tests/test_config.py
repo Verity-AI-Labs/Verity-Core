@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,10 @@ from verity_core.config import (
     DEFAULT_DOCKER_MEMORY_LIMIT,
     DEFAULT_MODEL_BASE_URL,
     DEFAULT_MODEL_NAME,
+    LAYERS,
     VerityConfig,
     load_config,
+    resolve_config,
 )
 
 
@@ -132,16 +135,114 @@ class TestEnvironmentLoading:
 
 
 class TestPrecedence:
-    def test_file_values_win_over_environment_variables(self, tmp_path: Path) -> None:
+    def test_layers_are_declared_lowest_priority_first(self) -> None:
+        # The precedence rule lives in this tuple; the resolver just folds it in order.
+        assert LAYERS == ("defaults", "environment", "file")
+
+    def test_the_file_wins_when_the_same_key_is_set_in_both(self, tmp_path: Path) -> None:
+        # The documented rule, asserted directly: same key, both sources, file wins.
         path = write_yaml(tmp_path, "model_name: from-file\n")
         config = load_config(path, env={"VERITY_MODEL_NAME": "from-env"})
         assert config.model_name == "from-file"
+
+    @pytest.mark.parametrize(
+        ("key", "yaml_body", "env_var", "env_value", "expected"),
+        [
+            ("model_name", "model_name: from-file", "VERITY_MODEL_NAME", "from-env", "from-file"),
+            (
+                "model_base_url",
+                "model_base_url: http://file:8000/v1",
+                "VERITY_MODEL_BASE_URL",
+                "http://env:8000/v1",
+                "http://file:8000/v1",
+            ),
+            ("docker_timeout", "docker_timeout: 111", "VERITY_DOCKER_TIMEOUT", "222", 111),
+            (
+                "docker_memory_limit",
+                "docker_memory_limit: 32g",
+                "VERITY_DOCKER_MEMORY_LIMIT",
+                "1g",
+                "32g",
+            ),
+            (
+                "docker_network_disabled",
+                "docker_network_disabled: false",
+                "VERITY_DOCKER_NETWORK_DISABLED",
+                "true",
+                False,
+            ),
+            (
+                "cache_dir",
+                "cache_dir: /tmp/from-file",
+                "VERITY_CACHE_DIR",
+                "/tmp/from-env",
+                Path("/tmp/from-file"),
+            ),
+        ],
+    )
+    def test_the_file_wins_for_every_field(
+        self,
+        tmp_path: Path,
+        key: str,
+        yaml_body: str,
+        env_var: str,
+        env_value: str,
+        expected: object,
+    ) -> None:
+        path = write_yaml(tmp_path, f"{yaml_body}\n")
+        config = load_config(path, env={env_var: env_value})
+        assert getattr(config, key) == expected
 
     def test_environment_still_fills_fields_the_file_omits(self, tmp_path: Path) -> None:
         path = write_yaml(tmp_path, "model_name: from-file\n")
         config = load_config(path, env={"VERITY_MODEL_BASE_URL": "http://from-env:8000/v1"})
         assert config.model_name == "from-file"
         assert config.model_base_url == "http://from-env:8000/v1"
+
+    def test_environment_wins_over_defaults(self) -> None:
+        assert load_config(env={"VERITY_MODEL_NAME": "from-env"}).model_name == "from-env"
+
+
+class TestProvenance:
+    def test_reports_the_layer_that_supplied_each_field(self, tmp_path: Path) -> None:
+        path = write_yaml(tmp_path, "model_name: from-file\n")
+        resolved = resolve_config(path, env={"VERITY_DOCKER_TIMEOUT": "30"})
+        assert resolved.sources["model_name"] == "file"
+        assert resolved.sources["docker_timeout"] == "environment"
+        assert resolved.sources["docker_memory_limit"] == "defaults"
+
+    def test_a_key_set_in_both_layers_is_attributed_to_the_file(self, tmp_path: Path) -> None:
+        path = write_yaml(tmp_path, "model_name: from-file\n")
+        resolved = resolve_config(path, env={"VERITY_MODEL_NAME": "from-env"})
+        assert resolved.sources["model_name"] == "file"
+        assert resolved.config.model_name == "from-file"
+
+    def test_every_field_is_attributed_to_some_layer(self) -> None:
+        resolved = resolve_config(env={})
+        assert set(resolved.sources) == {f.name for f in fields(VerityConfig)}
+        assert set(resolved.sources.values()) <= set(LAYERS)
+
+    def test_records_the_config_path_it_used(self, tmp_path: Path) -> None:
+        path = write_yaml(tmp_path, "model_name: m\n")
+        assert resolve_config(path, env={}).path == path
+
+    def test_the_path_is_none_when_no_file_was_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert resolve_config(env={}).path is None
+
+    def test_describe_returns_rows_in_declaration_order(self) -> None:
+        rows = resolve_config(env={"VERITY_MODEL_NAME": "m"}).describe()
+        assert [name for name, _, _ in rows] == [f.name for f in fields(VerityConfig)]
+        assert ("model_name", "m", "environment") in rows
+
+    def test_serializes_config_sources_and_path(self, tmp_path: Path) -> None:
+        path = write_yaml(tmp_path, "model_name: from-file\n")
+        payload = resolve_config(path, env={}).to_dict()
+        assert payload["config"]["model_name"] == "from-file"
+        assert payload["sources"]["model_name"] == "file"
+        assert payload["path"] == str(path)
 
 
 class TestDiscovery:

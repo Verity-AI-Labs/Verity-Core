@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
 import shlex
 import tarfile
 import time
@@ -26,6 +27,8 @@ from typing import Any
 
 import docker
 from docker.errors import DockerException, NotFound
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WORKDIR = "/workspace"
 DEFAULT_KEEPALIVE_COMMAND = ("sleep", "infinity")
@@ -164,7 +167,9 @@ class SandboxRunner:
             try:
                 self.client = docker.from_env()
             except DockerException as exc:
+                logger.error("docker daemon unreachable: %s", exc)
                 raise SandboxError(f"cannot reach the Docker daemon: {exc}") from exc
+            logger.debug("opened docker client from environment")
         return self.client
 
     def start(self) -> Any:
@@ -187,9 +192,19 @@ class SandboxRunner:
                 privileged=False,
             )
         except DockerException as exc:
+            logger.error("container start failed image=%s error=%s", self.image, exc)
             raise SandboxError(
                 f"failed to start container from image {self.image!r}: {exc}"
             ) from exc
+        logger.info(
+            "container started id=%s image=%s cpus=%s memory=%s network_disabled=%s timeout=%ss",
+            self._container.short_id,
+            self.image,
+            self.limits.cpu_count,
+            self.limits.memory_limit,
+            self.limits.network_disabled,
+            self.limits.timeout_seconds,
+        )
         return self._container
 
     def exec(
@@ -232,11 +247,12 @@ class SandboxRunner:
                 environment=dict(self.environment),
             )
         except DockerException as exc:
+            logger.error("exec failed command=%r error=%s", shell_command, exc)
             raise SandboxError(f"exec failed for {shell_command!r}: {exc}") from exc
         duration = time.monotonic() - started
 
         stdout_bytes, stderr_bytes = output if isinstance(output, tuple) else (output, None)
-        return ExecResult(
+        result = ExecResult(
             exit_code=exit_code,
             stdout=_decode(stdout_bytes),
             stderr=_decode(stderr_bytes),
@@ -244,6 +260,22 @@ class SandboxRunner:
             timed_out=_is_timeout(exit_code, duration, limit),
             command=shell_command,
         )
+        if result.timed_out:
+            logger.warning(
+                "exec timed out command=%r limit=%ss duration=%.2fs exit_code=%s",
+                shell_command,
+                limit,
+                duration,
+                exit_code,
+            )
+        else:
+            logger.debug(
+                "exec command=%r exit_code=%s duration=%.2fs",
+                shell_command,
+                exit_code,
+                duration,
+            )
+        return result
 
     def write_file(self, path: str, content: str | bytes, *, mode: int = 0o644) -> None:
         """Place a file inside the container without shelling out.
@@ -264,15 +296,19 @@ class SandboxRunner:
         try:
             self.container.put_archive(destination, archive.getvalue())
         except DockerException as exc:
+            logger.error("write failed path=%s error=%s", path, exc)
             raise SandboxError(f"failed to write {path!r} into the container: {exc}") from exc
+        logger.debug("wrote file path=%s bytes=%d", path, len(data))
 
     def read_file(self, path: str) -> bytes:
         """Read a file out of the container, raising :class:`SandboxError` if absent."""
         try:
             stream, _ = self.container.get_archive(path)
         except NotFound as exc:
+            logger.warning("read missed path=%s (no such file in container)", path)
             raise SandboxError(f"no such file in container: {path!r}") from exc
         except DockerException as exc:
+            logger.error("read failed path=%s error=%s", path, exc)
             raise SandboxError(f"failed to read {path!r} from the container: {exc}") from exc
 
         archive = io.BytesIO(b"".join(stream))
@@ -297,10 +333,12 @@ class SandboxRunner:
                 tag=f"{self.container.short_id}-{int(time.time() * 1000)}",
             )
         except DockerException as exc:
+            logger.error("snapshot failed image=%s error=%s", self.image, exc)
             raise SandboxError(f"failed to snapshot container: {exc}") from exc
 
         image_id = getattr(image, "id", None) or str(image)
         self._snapshot_images.append(image_id)
+        logger.info("snapshot committed image=%s source_image=%s", image_id, self.image)
         return json.dumps(
             {
                 "version": 1,
@@ -323,6 +361,7 @@ class SandboxRunner:
         if not image:
             raise SandboxError("snapshot token is missing an image reference")
 
+        logger.info("restoring container from snapshot image=%s", image)
         self.stop()
         previous_image, self.image = self.image, image
         try:
@@ -339,9 +378,12 @@ class SandboxRunner:
         try:
             container.remove(force=True)
         except NotFound:
-            pass
+            logger.debug("container already gone id=%s", container.short_id)
         except DockerException as exc:
+            logger.error("container removal failed id=%s error=%s", container.short_id, exc)
             raise SandboxError(f"failed to remove container: {exc}") from exc
+        else:
+            logger.info("container stopped id=%s", container.short_id)
 
     def cleanup(self) -> None:
         """Remove the container and every image this runner committed.
@@ -360,4 +402,5 @@ class SandboxRunner:
         for image_id in self._snapshot_images:
             with contextlib.suppress(DockerException, NotFound):
                 client.images.remove(image_id, force=True)
+                logger.debug("removed snapshot image=%s", image_id)
         self._snapshot_images.clear()

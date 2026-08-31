@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ from types import TracebackType
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_CACHE_DIR = Path(".verity_cache") / "models"
@@ -166,7 +169,10 @@ class ResponseCache:
             with path.open("r", encoding="utf-8") as handle:
                 record = json.load(handle)
             return ModelResponse.from_dict(record["response"])
-        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError):
+        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
+            # Recoverable, but worth surfacing: the run stays correct at the cost of a
+            # re-sample, and a rash of these means the cache directory is damaged.
+            logger.warning("cache entry unreadable key=%s path=%s error=%s", key, path, exc)
             return None
 
     def set(self, key: str, response: ModelResponse, request: dict[str, Any] | None = None) -> None:
@@ -183,6 +189,7 @@ class ResponseCache:
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(record, handle, indent=2, sort_keys=True)
         os.replace(tmp, path)
+        logger.debug("cache write key=%s path=%s", key, path)
 
 
 class ModelClient:
@@ -280,7 +287,14 @@ class ModelClient:
             if hit is not None:
                 self._cache_hits += 1
                 hit.cached = True
+                logger.debug(
+                    "model call cache=hit model=%s key=%s tokens=%d",
+                    model,
+                    cache_key,
+                    hit.usage.total_tokens,
+                )
                 return hit
+            logger.debug("model call cache=miss model=%s key=%s", model, cache_key)
 
         request_body: dict[str, Any] = {
             "model": model,
@@ -292,6 +306,16 @@ class ModelClient:
         response = self._post_chat_completion(request_body)
         self._api_calls += 1
         self._total_usage = self._total_usage + response.usage
+        logger.info(
+            "model call model=%s cache=miss prompt_tokens=%d completion_tokens=%d "
+            "total_tokens=%d finish_reason=%s session_total=%d",
+            response.model,
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+            response.finish_reason or "unknown",
+            self._total_usage.total_tokens,
+        )
 
         if self.cache is not None and cache_key is not None:
             self.cache.set(cache_key, response, request=request_body)
@@ -312,6 +336,7 @@ class ModelClient:
             try:
                 http_response = self._http.post(url, json=body, headers=self._headers())
             except httpx.HTTPError as exc:
+                logger.error("model endpoint unreachable url=%s error=%s", url, exc)
                 last_error = ModelError(f"request to {url} failed: {exc}")
             else:
                 if http_response.status_code < 400:
@@ -320,11 +345,26 @@ class ModelClient:
                     f"{url} returned HTTP {http_response.status_code}: {http_response.text[:500]}"
                 )
                 if http_response.status_code not in RETRYABLE_STATUS_CODES:
+                    logger.error(
+                        "model call rejected url=%s status=%s (not retryable)",
+                        url,
+                        http_response.status_code,
+                    )
                     break
+                logger.warning(
+                    "model call failed url=%s status=%s attempt=%d/%d (retryable)",
+                    url,
+                    http_response.status_code,
+                    attempt + 1,
+                    self.max_retries + 1,
+                )
 
             if attempt < self.max_retries:
-                time.sleep(2**attempt)
+                backoff = 2**attempt
+                logger.debug("retrying model call in %ss", backoff)
+                time.sleep(backoff)
 
+        logger.error("model call failed after %d attempt(s) url=%s", self.max_retries + 1, url)
         raise last_error if last_error else ModelError(f"request to {url} failed")
 
     @staticmethod

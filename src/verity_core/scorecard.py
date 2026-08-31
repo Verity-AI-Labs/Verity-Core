@@ -13,10 +13,13 @@ what each axis measures; those live in the rubric.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 VALIDITY_AXES: tuple[str, ...] = ("V1", "V2", "V3", "V4", "V5", "V6", "V7")
 UTILITY_AXES: tuple[str, ...] = ("U1", "U2", "U3", "U4", "U6", "U7")
@@ -137,6 +140,13 @@ class Scorecard:
             notes=notes,
         )
         self.axes[axis] = entry
+        logger.debug(
+            "axis set env_id=%s axis=%s value=%s tool=%s",
+            self.env_id,
+            axis,
+            value,
+            tool or "unattributed",
+        )
         return entry
 
     def get_axis(self, axis: str) -> AxisValue:
@@ -189,6 +199,13 @@ class Scorecard:
         with target.open("w", encoding="utf-8") as handle:
             json.dump(self.to_dict(), handle, indent=2, sort_keys=True)
             handle.write("\n")
+        logger.info(
+            "scorecard written env_id=%s path=%s scored=%d/%d",
+            self.env_id,
+            target,
+            len(self.scored_axes),
+            len(AXES),
+        )
 
     @classmethod
     def from_json(cls, path: Path | str) -> Scorecard:

@@ -10,6 +10,7 @@ lifecycle code, so there is exactly one place where sandbox handling can go wron
 from __future__ import annotations
 
 import importlib
+import logging
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Any
@@ -23,6 +24,8 @@ from verity_core.env import (
     TaskSpec,
 )
 from verity_core.runner import ExecResult, ResourceLimits, SandboxRunner
+
+logger = logging.getLogger(__name__)
 
 GOLD_MANIFEST_KEYS = ("gold_solution", "gold_solution_path", "gold_patch")
 
@@ -44,7 +47,9 @@ def require(entry: Mapping[str, Any], key: str, *, context: str) -> Any:
     """Fetch a manifest field, failing loudly when it is absent or blank."""
     value = entry.get(key)
     if value is None or value == "":
-        raise ManifestError(f"{context}: manifest entry needs a non-empty {key!r} field")
+        message = f"{context}: manifest entry needs a non-empty {key!r} field"
+        logger.error("%s", message)
+        raise ManifestError(message)
     return value
 
 
@@ -60,13 +65,15 @@ def parse_task_spec(entry: Mapping[str, Any], *, default_domain: str = "other") 
 
     domain = str(entry.get("domain") or default_domain)
     if domain not in DOMAINS:
-        raise ManifestError(f"{context}: unknown domain {domain!r}; expected one of {DOMAINS}")
+        message = f"{context}: unknown domain {domain!r}; expected one of {DOMAINS}"
+        logger.error("%s", message)
+        raise ManifestError(message)
 
     reward_type = str(entry.get("reward_type") or "binary")
     if reward_type not in REWARD_TYPES:
-        raise ManifestError(
-            f"{context}: unknown reward_type {reward_type!r}; expected one of {REWARD_TYPES}"
-        )
+        message = f"{context}: unknown reward_type {reward_type!r}; expected one of {REWARD_TYPES}"
+        logger.error("%s", message)
+        raise ManifestError(message)
 
     declared_gold = entry.get("has_gold")
     inferred_gold = any(entry.get(key) for key in GOLD_MANIFEST_KEYS)
@@ -235,11 +242,19 @@ class ContainerEnv:
     def reset(self) -> Observation:
         """Recreate the container and run any manifest setup commands."""
         self._history.clear()
+        logger.info("env reset env_id=%s image=%s", self._spec.id, self.image)
         runner = self.runner
         runner.start()
         self._started = True
         for command in self.setup_commands:
-            runner.exec(str(command))
+            result = runner.exec(str(command))
+            if not result.ok:
+                logger.warning(
+                    "setup command failed env_id=%s command=%r exit_code=%s",
+                    self._spec.id,
+                    command,
+                    result.exit_code,
+                )
         return Observation(
             text=self._spec.instructions,
             metadata={"task_id": self._spec.id, "image": self.image, "workdir": runner.workdir},
@@ -274,7 +289,9 @@ class ContainerEnv:
         between them, or a file left behind by one trial will score the next.
         """
         if not self.test_command:
-            raise ManifestError(f"{self.context}: manifest entry needs a 'test_command' field")
+            message = f"{self.context}: manifest entry needs a 'test_command' field"
+            logger.error("%s", message)
+            raise ManifestError(message)
 
         if self.reset_before_verify or not self._started:
             self.reset()
@@ -298,14 +315,29 @@ class ContainerEnv:
             if not applied.ok:
                 verdict = False
                 state["apply_failed"] = True
+                logger.warning(
+                    "submission did not apply env_id=%s command=%r exit_code=%s",
+                    self._spec.id,
+                    applied.command,
+                    applied.exit_code,
+                )
 
         # TODO: parse per-test results (pytest report, Terminal-Bench JSON) so
         # partial-credit graders yield fractional reward instead of this binary
         # fallback. Reported in verifier_state so callers can see it happened.
         if self._spec.reward_type == "partial":
             state["grading"] = "binary_fallback"
+            logger.warning("partial-credit grading fell back to binary env_id=%s", self._spec.id)
 
         logs = "\n".join(part for part in (tested.stdout, tested.stderr) if part)
+        logger.info(
+            "verify complete env_id=%s verdict=%s reward=%.3f exit_code=%s duration=%.2fs",
+            self._spec.id,
+            verdict,
+            1.0 if verdict else 0.0,
+            tested.exit_code,
+            tested.duration_seconds,
+        )
         return RewardResult(
             reward=1.0 if verdict else 0.0,
             verdict=verdict,
@@ -335,5 +367,6 @@ class ContainerEnv:
     def close(self) -> None:
         """Tear down the sandbox and any images it committed."""
         if self._runner is not None:
+            logger.debug("closing env env_id=%s", self._spec.id)
             self._runner.cleanup()
         self._started = False
