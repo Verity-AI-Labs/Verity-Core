@@ -12,6 +12,9 @@ dependencies = [
     "pyyaml>=6.0.1",
 ]
 
+[project.scripts]
+verity-core = "verity_core.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/Verity-AI-Labs/Verity-Core"
 Repository = "https://github.com/Verity-AI-Labs/Verity-Core"
